@@ -23,6 +23,136 @@ excel_data_collector = {
     "parsing_log": []  # Лог парсинга
 }
 
+# Глобальные переменные для восстановления
+parsing_state = {
+    "current_category": 0,
+    "current_subcategory": 0,
+    "total_categories": 0,
+    "processed_items": 0,
+    "last_successful_url": "",
+    "start_time": None
+}
+
+def restart_browser():
+    """Перезапускает браузер для избежания проблем с памятью"""
+    global driver
+    try:
+        if 'driver' in globals() and driver:
+            print("🔄 Перезапуск браузера...")
+            driver.quit()
+            time.sleep(2)
+        
+        chrome_options = Options()
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-plugins")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--memory-pressure-off")
+        
+        driver = webdriver.Chrome(options=chrome_options)
+        print("✅ Браузер перезапущен")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Ошибка перезапуска браузера: {e}")
+        return False
+
+def safe_get_page(url, retries=3):
+    """Безопасное получение страницы с повторными попытками"""
+    global driver
+    
+    for attempt in range(retries):
+        try:
+            print(f"   🌐 Переход на: {url} (попытка {attempt + 1})")
+            driver.get(url)
+            time.sleep(2)
+            
+            # Проверяем, что страница загрузилась
+            if "Error" not in driver.title and len(driver.page_source) > 1000:
+                parsing_state["last_successful_url"] = url
+                return True
+            else:
+                print(f"   ⚠️ Страница загрузилась некорректно")
+                
+        except Exception as e:
+            print(f"   ❌ Ошибка загрузки страницы (попытка {attempt + 1}): {e}")
+            
+            if attempt < retries - 1:
+                print(f"   🔄 Перезапуск браузера перед следующей попыткой...")
+                if not restart_browser():
+                    continue
+                time.sleep(3)
+            
+    print(f"   ❌ Не удалось загрузить страницу после {retries} попыток")
+    return False
+
+def safe_parse_with_retry(parse_function, context=""):
+    """Безопасный парсинг с повторными попытками"""
+    retries = 2
+    
+    for attempt in range(retries):
+        try:
+            result = parse_function()
+            if result:  # Если результат не пустой
+                return result
+            else:
+                print(f"   ⚠️ Пустой результат при парсинге {context} (попытка {attempt + 1})")
+                
+        except Exception as e:
+            print(f"   ❌ Ошибка парсинга {context} (попытка {attempt + 1}): {e}")
+            
+            if attempt < retries - 1:
+                print(f"   🔄 Пауза перед повторной попыткой...")
+                time.sleep(5)
+                
+                # Обновляем страницу
+                try:
+                    driver.refresh()
+                    time.sleep(3)
+                except:
+                    restart_browser()
+                    if parsing_state["last_successful_url"]:
+                        safe_get_page(parsing_state["last_successful_url"])
+    
+    print(f"   ❌ Парсинг {context} не удался после {retries} попыток")
+    return []
+
+def save_progress_checkpoint():
+    """Сохраняет промежуточный прогресс"""
+    try:
+        if excel_data_collector["all_products"]:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            checkpoint_file = f"checkpoint_progress_{timestamp}.xlsx"
+            filepath = os.path.join("results", checkpoint_file)
+            
+            # Создаем промежуточный Excel файл
+            with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+                if excel_data_collector["all_products"]:
+                    df = pd.DataFrame(excel_data_collector["all_products"])
+                    df.to_excel(writer, sheet_name='Промежуточные результаты', index=False)
+                
+                # Сохраняем состояние парсинга
+                state_df = pd.DataFrame([parsing_state])
+                state_df.to_excel(writer, sheet_name='Состояние парсинга', index=False)
+            
+            print(f"💾 Сохранен промежуточный результат: {checkpoint_file}")
+            print(f"   📊 Товаров собрано: {len(excel_data_collector['all_products'])}")
+            
+    except Exception as e:
+        print(f"❌ Ошибка сохранения промежуточного результата: {e}")
+
+def update_parsing_progress(category_index, subcategory_index, total_categories):
+    """Обновляет прогресс парсинга"""
+    parsing_state["current_category"] = category_index
+    parsing_state["current_subcategory"] = subcategory_index
+    parsing_state["total_categories"] = total_categories
+    parsing_state["processed_items"] += 1
+    
+    # Сохраняем промежуточный результат каждые 10 обработанных элементов
+    if parsing_state["processed_items"] % 10 == 0:
+        save_progress_checkpoint()
+
 def add_to_excel_collector(data, category_name, subcategory_name, data_type="products"):
     """Добавляет данные в глобальный накопитель для Excel"""
     global excel_data_collector
@@ -43,18 +173,19 @@ def add_to_excel_collector(data, category_name, subcategory_name, data_type="pro
                     'subcategory': subcategory_name,
                     'block_title': block_title,
                     'block_image': block_image,
-                    'table_headers': table_headers,
-                    'product_name': product.get('name', ''),
-                    'product_url': product.get('url', ''),
-                    'product_article': product.get('article', ''),
+                    'name': product.get('name', ''),
+                    'url': product.get('url', ''),
+                    'article': product.get('article', ''),
+                    'image_url': product.get('image_url', ''),
                     'timestamp': timestamp,
-                    'data_type': 'table_product'
+                    'data_type': 'table_product',
+                    'table_headers': block.get('table_headers', [])  # Сохраняем заголовки как список
                 }
                 
-                # Добавляем все дополнительные параметры товара
+                # Добавляем все дополнительные параметры товара БЕЗ префикса
                 for key, value in product.items():
-                    if key not in ['name', 'url', 'article']:
-                        row[f'param_{key}'] = str(value)
+                    if key not in ['name', 'url', 'article', 'image_url'] and not key.startswith('_'):
+                        row[key] = str(value) if value is not None else ''
                 
                 excel_data_collector["all_products"].append(row)
                 products_count += 1
@@ -74,8 +205,8 @@ def add_to_excel_collector(data, category_name, subcategory_name, data_type="pro
             row = {
                 'category': category_name,
                 'subcategory': subcategory_name,
-                'product_name': product.get('name', ''),
-                'product_url': product.get('url', ''),
+                'name': product.get('name', ''),
+                'url': product.get('url', ''),
                 'image_url': product.get('image_url', ''),
                 'price': product.get('price', ''),
                 'preorder_price': product.get('preorder_price', ''),
@@ -83,6 +214,12 @@ def add_to_excel_collector(data, category_name, subcategory_name, data_type="pro
                 'timestamp': timestamp,
                 'data_type': 'custom_list_product'
             }
+            
+            # Добавляем все дополнительные поля (например, характеристики)
+            for key, value in product.items():
+                if key not in ['name', 'url', 'image_url', 'price', 'preorder_price', 'is_preorder'] and not key.startswith('_'):
+                    row[key] = str(value) if value is not None else ''
+            
             excel_data_collector["all_products"].append(row)
         
         # Логируем
@@ -100,15 +237,17 @@ def add_to_excel_collector(data, category_name, subcategory_name, data_type="pro
             row = {
                 'category': category_name,
                 'subcategory': subcategory_name,
-                'product_name': product.get('name', ''),
-                'product_url': product.get('url', ''),
+                'name': product.get('name', ''),
+                'url': product.get('url', ''),
+                'article': product.get('article', ''),
+                'image_url': product.get('image_url', ''),
                 'timestamp': timestamp,
                 'data_type': 'regular_product'
             }
-            # Добавляем все остальные поля
+            # Добавляем все остальные поля БЕЗ переименования
             for key, value in product.items():
-                if key not in ['name', 'url']:
-                    row[key] = str(value)
+                if key not in ['name', 'url', 'article', 'image_url'] and not key.startswith('_'):
+                    row[key] = str(value) if value is not None else ''
             
             excel_data_collector["all_products"].append(row)
         
@@ -195,46 +334,122 @@ def save_consolidated_excel():
         print(f"   → Категорий: {len(excel_data_collector['categories_summary'])}")
         print(f"   → Записей в логе: {len(excel_data_collector['parsing_log'])}")
         
+        # Отладочная информация о полях
+        if excel_data_collector["all_products"]:
+            sample_product = excel_data_collector["all_products"][0]
+            print(f"   🔍 Поля в первом товаре: {list(sample_product.keys())}")
+            
+            # Проверяем сколько товаров имеют непустой image_url
+            image_url_count = sum(1 for p in excel_data_collector["all_products"] if p.get('image_url') and p.get('image_url').strip())
+            print(f"   🖼️ Товаров с изображениями: {image_url_count}/{len(excel_data_collector['all_products'])}")
+        
         # Создаем Excel книгу
         with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
             
-            # Лист 1: Все товары
-            if excel_data_collector["all_products"]:
-                products_df = pd.DataFrame(excel_data_collector["all_products"])
-                products_df.to_excel(writer, sheet_name='Все товары', index=False)
-                print(f"   ✓ Создан лист 'Все товары' ({len(products_df)} строк)")
+            # Группируем товары по структуре таблиц (по наборам заголовков)
+            tables_by_headers = {}
             
-            # Лист 2: Сводка по категориям
+            for product in excel_data_collector["all_products"]:
+                # Определяем набор заголовков для этого товара
+                headers = tuple(sorted([k for k in product.keys() if k not in ['category', 'subcategory', 'data_type', 'table_headers']]))
+                
+                if headers not in tables_by_headers:
+                    tables_by_headers[headers] = {
+                        'products': [],
+                        'category': product.get('category', 'Неизвестная'),
+                        'subcategory': product.get('subcategory', ''),
+                        'table_headers': product.get('table_headers', [])
+                    }
+                
+                tables_by_headers[headers]['products'].append(product)
+            
+            print(f"📊 Найдено {len(tables_by_headers)} различных структур таблиц")
+            
+            # Создаем листы для каждой структуры таблицы
+            sheet_counter = 1
+            for headers, table_data in tables_by_headers.items():
+                products = table_data['products']
+                category = table_data['category']
+                subcategory = table_data['subcategory']
+                
+                if products:
+                    # Создаем DataFrame с правильными заголовками
+                    df = pd.DataFrame(products)
+                    
+                    # Убираем служебные колонки
+                    columns_to_remove = ['data_type', 'table_headers']
+                    df = df.drop(columns=[col for col in columns_to_remove if col in df.columns], errors='ignore')
+                    
+                    # Переупорядочиваем колонки: основные поля в начале
+                    basic_columns = ['name', 'article', 'url', 'image_url', 'category', 'subcategory']
+                    other_columns = [col for col in df.columns if col not in basic_columns]
+                    ordered_columns = [col for col in basic_columns if col in df.columns] + other_columns
+                    
+                    # Отладочная информация о колонках
+                    missing_basic = [col for col in basic_columns if col not in df.columns]
+                    if missing_basic:
+                        print(f"   ⚠️ Отсутствующие базовые колонки: {missing_basic}")
+                    
+                    # Убеждаемся что все базовые колонки присутствуют (даже если пустые)
+                    for col in basic_columns:
+                        if col not in df.columns:
+                            df[col] = ''  # Добавляем пустую колонку если её нет
+                    
+                    # Переупорядочиваем с учетом всех базовых колонок
+                    other_columns = [col for col in df.columns if col not in basic_columns]
+                    ordered_columns = basic_columns + other_columns
+                    df = df[ordered_columns]
+                    
+                    # Формируем название листа
+                    if subcategory:
+                        sheet_name = f"{category}_{subcategory}"[:31]
+                    else:
+                        sheet_name = f"{category}_таблица_{sheet_counter}"[:31]
+                    
+                    # Убираем недопустимые символы из имени листа
+                    invalid_chars = ['\\', '/', '*', '[', ']', ':', '?']
+                    for char in invalid_chars:
+                        sheet_name = sheet_name.replace(char, '_')
+                    
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+                    print(f"   ✓ Создан лист '{sheet_name}' ({len(df)} товаров, {len(df.columns)} колонок)")
+                    print(f"       Колонки: {list(df.columns)}")
+                    
+                    sheet_counter += 1
+            
+            # Лист: Все товары (объединенный)
+            if excel_data_collector["all_products"]:
+                all_products_df = pd.DataFrame(excel_data_collector["all_products"])
+                # Убираем служебные колонки
+                columns_to_remove = ['table_headers']
+                all_products_df = all_products_df.drop(columns=[col for col in columns_to_remove if col in all_products_df.columns], errors='ignore')
+                all_products_df.to_excel(writer, sheet_name='Все товары (общий)', index=False)
+                print(f"   ✓ Создан лист 'Все товары (общий)' ({len(all_products_df)} строк)")
+            
+            # Лист: Сводка по категориям
             if excel_data_collector["categories_summary"]:
                 summary_df = pd.DataFrame(excel_data_collector["categories_summary"])
                 summary_df.to_excel(writer, sheet_name='Сводка по категориям', index=False)
                 print(f"   ✓ Создан лист 'Сводка по категориям' ({len(summary_df)} строк)")
             
-            # Лист 3: Лог парсинга
+            # Лист: Лог парсинга
             if excel_data_collector["parsing_log"]:
                 log_df = pd.DataFrame(excel_data_collector["parsing_log"])
                 log_df.to_excel(writer, sheet_name='Лог парсинга', index=False)
                 print(f"   ✓ Создан лист 'Лог парсинга' ({len(log_df)} строк)")
             
-            # Лист 4: Товары по типам данных
-            for data_type, count in data_types_count.items():
-                if count > 0:
-                    type_products = [p for p in excel_data_collector["all_products"] if p.get('data_type') == data_type]
-                    if type_products:
-                        type_df = pd.DataFrame(type_products)
-                        safe_sheet_name = f"{data_type}"[:31]  # Excel ограничение на длину имени листа
-                        type_df.to_excel(writer, sheet_name=safe_sheet_name, index=False)
-                        print(f"   ✓ Создан лист '{safe_sheet_name}' ({len(type_df)} товаров)")
-            
-            # Лист 5: Товары по категориям (разделенные)
-            categories = set(product.get('category', 'Неизвестная') for product in excel_data_collector["all_products"])
-            for category in list(categories)[:5]:  # Максимум 5 листов категорий
-                cat_products = [p for p in excel_data_collector["all_products"] if p.get('category') == category]
-                if cat_products:
-                    cat_df = pd.DataFrame(cat_products)
-                    safe_sheet_name = f"Кат_{category}"[:31]  # Excel ограничение на длину имени листа
-                    cat_df.to_excel(writer, sheet_name=safe_sheet_name, index=False)
-                    print(f"   ✓ Создан лист '{safe_sheet_name}' ({len(cat_df)} товаров)")
+            # Лист: Статистика по типам данных
+            if data_types_count:
+                stats_data = []
+                for data_type, count in data_types_count.items():
+                    stats_data.append({
+                        'Тип данных': data_type,
+                        'Количество товаров': count,
+                        'Процент от общего': f"{count / len(excel_data_collector['all_products']) * 100:.1f}%"
+                    })
+                stats_df = pd.DataFrame(stats_data)
+                stats_df.to_excel(writer, sheet_name='Статистика типов', index=False)
+                print(f"   ✓ Создан лист 'Статистика типов' ({len(stats_df)} строк)")
         
         print(f"🎉 Excel файл успешно создан: {filepath}")
         print(f"📁 Размер файла: {os.path.getsize(filepath) / 1024 / 1024:.2f} МБ")
@@ -635,21 +850,49 @@ def get_products():
     try:
         # Ждём загрузки (можно заменить на WebDriverWait)
         time.sleep(1.5)
+        
+        # Проверяем наличие под-подкатегорий
         tabel_warper = driver.find_elements(
             By.CSS_SELECTOR,
             "div.sections_wrapper.block"
         )
 
+        # Проверяем наличие старой структуры товаров
         display_list = driver.find_elements(
             By.CSS_SELECTOR,
             "div.display_list.custom_list.show_un_props"
         )
+        
+        # Проверяем наличие новой структуры товаров
+        new_structure_items = driver.find_elements(
+            By.CSS_SELECTOR,
+            "div.list_item.item_info.catalog-adaptive.flexbox.flexbox--row"
+        )
+        
+        # Проверяем наличие любых товаров в списке
+        any_list_items = driver.find_elements(
+            By.CSS_SELECTOR,
+            ".list_item.item_info.catalog-adaptive, .list_item_wrapp"
+        )
+        
+        # Проверяем, является ли это страницей отдельного товара
+        product_detail_indicators = [
+            ".product-detail-gallery__container",
+            ".product-main", 
+            ".product-info",
+            "h1[itemprop='name']"
+        ]
+        
+        is_single_product = any(driver.find_elements(By.CSS_SELECTOR, indicator) for indicator in product_detail_indicators)
 
         if tabel_warper:
             print("Парсим под-подкатегории")
             return parse_grandchildren()
-        elif display_list:
-            print("Найден список товаров")
+        elif is_single_product:
+            print("🔍 Обнаружена страница отдельного товара")
+            return parse_custom_list()  # parse_custom_list умеет обрабатывать отдельные товары
+        elif display_list or new_structure_items or any_list_items:
+            print(f"Найден список товаров (новая структура: {len(new_structure_items)}, старая: {len(display_list)}, общая: {len(any_list_items)})")
             return parse_custom_list()
         else:
             print("Найдена таблица товаров")
@@ -665,13 +908,39 @@ def parse_custom_list():
     Парсит товары из custom_list с детальной информацией:
     - изображения, цены, ссылки
     - поддержка предзаказных цен
+    - поддержка страниц отдельных товаров (product-detail)
     """
     products = []
 
-    # Ищем товары по разным селекторам
+    # Проверяем, является ли это страницей отдельного товара
+    is_product_detail_page = False
+    try:
+        # Проверяем наличие элементов, характерных для страницы товара
+        product_detail_indicators = [
+            ".product-detail-gallery__container",
+            ".product-main",
+            ".product-info",
+            "div[class*='product-detail']"
+        ]
+        
+        for indicator in product_detail_indicators:
+            if driver.find_elements(By.CSS_SELECTOR, indicator):
+                is_product_detail_page = True
+                print("🔍 Обнаружена страница отдельного товара")
+                break
+    except:
+        pass
+
+    if is_product_detail_page:
+        # Парсим страницу отдельного товара
+        return parse_single_product_page()
+    
+    # Ищем товары по разным селекторам (обычный режим)
     item_selectors = [
+        "div.list_item.item_info.catalog-adaptive.flexbox.flexbox--row",  # Новая структура
         "div.list_item_wrapp.item_wrapp.item.item-parent.clearfix",  # Основной селектор по скриншоту
         "div.list_item_info.catalog-adaptive.flexbox",  # Альтернативный
+        ".list_item.item_info.catalog-adaptive",  # Упрощенный селектор для новой структуры
         ".list_item_wrapp",
         "div.list_item", 
         "a.thumb",
@@ -683,12 +952,32 @@ def parse_custom_list():
         try:
             list_items = driver.find_elements(By.CSS_SELECTOR, selector)
             if list_items:
-                print(f"Найдены товары с селектором: {selector}")
+                print(f"✅ Найдены товары с селектором: {selector} ({len(list_items)} элементов)")
                 break
-        except:
+            else:
+                print(f"⚠️ Селектор {selector} не дал результатов")
+        except Exception as e:
+            print(f"❌ Ошибка с селектором {selector}: {e}")
             continue
     
     print(f"Найдено элементов custom_list: {len(list_items)}")
+    
+    if not list_items:
+        print("❌ Товары не найдены! Попробуем диагностику...")
+        # Диагностическая информация
+        page_content_indicators = [
+            "div.sections_wrapper.block",
+            "table",
+            ".catalog-adaptive",
+            ".list_item",
+            ".item_info"
+        ]
+        
+        for indicator in page_content_indicators:
+            elements = driver.find_elements(By.CSS_SELECTOR, indicator)
+            print(f"   🔍 {indicator}: найдено {len(elements)} элементов")
+        
+        return []
     
     for i, item in enumerate(list_items):
         try:
@@ -705,7 +994,9 @@ def parse_custom_list():
             try:
                 # Пробуем разные селекторы для ссылки на товар
                 link_selectors = [
-                    "a.dark_link.js-notice-block__title",
+                    "a.dark_link.js-notice-block__title",  # Старая структура
+                    ".list_item_wrap a[href*='/catalog/']",  # Новая структура
+                    ".list_item_info a[href*='/catalog/']",  # Новая структура альтернатива
                     "a[href*='/catalog/']",
                     "a.product-link",
                     "a"
@@ -715,6 +1006,7 @@ def parse_custom_list():
                 for selector in link_selectors:
                     try:
                         product_link = item.find_element(By.CSS_SELECTOR, selector)
+                        print(f"   🔗 Ссылка найдена с селектором: {selector}")
                         break
                     except:
                         continue
@@ -724,8 +1016,25 @@ def parse_custom_list():
                     
                     # Извлекаем название
                     try:
-                        name_elem = product_link.find_element(By.TAG_NAME, "span")
-                        product_data["name"] = name_elem.text.strip()
+                        # Пробуем разные способы извлечения названия
+                        name_selectors = [
+                            "span.font_md",  # Старая структура
+                            "span",  # Универсальный
+                            ".js-notice-block__title span",  # Альтернатива
+                        ]
+                        
+                        name_found = False
+                        for name_sel in name_selectors:
+                            try:
+                                name_elem = product_link.find_element(By.CSS_SELECTOR, name_sel)
+                                product_data["name"] = name_elem.text.strip()
+                                name_found = True
+                                break
+                            except:
+                                continue
+                        
+                        if not name_found:
+                            product_data["name"] = product_link.text.strip() or "Без названия"
                     except:
                         product_data["name"] = product_link.text.strip() or "Без названия"
                         
@@ -768,10 +1077,12 @@ def parse_custom_list():
                 # Если не найдено в span с data-src, ищем обычные img теги
                 if not image_found:
                     image_selectors = [
-                        ".section-gallery-wrapper.flexbox img",
+                        ".image_block img",  # Новая структура - основной селектор
+                        ".list_item_wrap .image_block img",  # Новая структура - детализированный
+                        ".section-gallery-wrapper.flexbox img",  # Старая структура
                         "div.section-gallery-wrapper img", 
                         ".section-gallery-wrapper img",
-                        ".image_block img",
+                        ".item_info img",  # Новая структура альтернатива
                         "img"
                     ]
                     
@@ -789,6 +1100,7 @@ def parse_custom_list():
                                         image_url = 'https://cnc1.ru' + image_url
                                 product_data["image_url"] = image_url
                                 image_found = True
+                                print(f"   🖼️ Изображение найдено с селектором: {selector}")
                                 break
                         except:
                             continue
@@ -803,7 +1115,10 @@ def parse_custom_list():
             try:
                 # Ищем обычную цену с учетом структуры со скриншота
                 price_selectors = [
-                    "span.values_wrapper",  # Основной селектор со скриншота
+                    ".price_matrix_wrapper .price",  # Новая структура
+                    ".cost.price.clearfix",  # Новая структура альтернатива  
+                    ".information_wrap .cost.price",  # Новая структура детализированная
+                    "span.values_wrapper",  # Основной селектор со скриншота (старая структура)
                     "span.price_measure",   # Альтернативный
                     ".price.font-bold.font_mxs",
                     ".values_wrapper",
@@ -869,6 +1184,185 @@ def parse_custom_list():
     
     print(f"Найдено товаров в custom_list: {len(products)}")
     return products
+
+def parse_single_product_page():
+    """
+    Парсит страницу отдельного товара с новой структурой CSS
+    """
+    try:
+        product_data = {
+            "name": "Не указано",
+            "url": driver.current_url,
+            "image_url": None,
+            "price": None,
+            "preorder_price": None,
+            "is_preorder": False,
+            "characteristics": {}
+        }
+        
+        # Извлекаем название товара
+        try:
+            title_selectors = [
+                "h1.product-main__title",
+                "h1[itemprop='name']",
+                ".product-main h1",
+                ".product-info h1",
+                "h1"
+            ]
+            
+            for selector in title_selectors:
+                try:
+                    title_elem = driver.find_element(By.CSS_SELECTOR, selector)
+                    product_data["name"] = title_elem.text.strip()
+                    print(f"   ✅ Название: {product_data['name']}")
+                    break
+                except:
+                    continue
+        except Exception as e:
+            print(f"   ❌ Ошибка извлечения названия: {e}")
+        
+        # Извлекаем изображение из product-detail-gallery__container
+        try:
+            image_found = False
+            
+            # Новые селекторы согласно вашему описанию
+            image_selectors = [
+                ".product-detail-gallery__container--vertical link[href]",  # В теге link, в href
+                ".product-detail-gallery__container link[href]",
+                ".product-detail-gallery__container a[href*='.jpg']",
+                ".product-detail-gallery__container a[href*='.png']",
+                ".product-detail-gallery__container a[href*='.jpeg']",
+                ".product-detail-gallery__container a.fancy.popup_link",
+                ".product-detail-gallery__container .fancy[href]"
+            ]
+            
+            for selector in image_selectors:
+                try:
+                    image_elem = driver.find_element(By.CSS_SELECTOR, selector)
+                    image_url = image_elem.get_attribute('href')
+                    
+                    if image_url and any(ext in image_url.lower() for ext in ['.jpg', '.jpeg', '.png', '.gif']):
+                        if not image_url.startswith('http'):
+                            if image_url.startswith('//'):
+                                image_url = 'https:' + image_url
+                            elif image_url.startswith('/'):
+                                image_url = 'https://cnc1.ru' + image_url
+                        
+                        product_data["image_url"] = image_url
+                        image_found = True
+                        print(f"   ✅ Изображение найдено: {image_url}")
+                        break
+                except Exception as e:
+                    continue
+            
+            # Если не найдено в link/a тегах, ищем в img
+            if not image_found:
+                img_selectors = [
+                    ".product-detail-gallery__container img[src]",
+                    ".product-detail-gallery__container img[data-src]",
+                    ".product-detail-gallery img"
+                ]
+                
+                for selector in img_selectors:
+                    try:
+                        img_elem = driver.find_element(By.CSS_SELECTOR, selector)
+                        image_url = img_elem.get_attribute('data-src') or img_elem.get_attribute('src')
+                        
+                        if image_url:
+                            if not image_url.startswith('http'):
+                                if image_url.startswith('//'):
+                                    image_url = 'https:' + image_url
+                                elif image_url.startswith('/'):
+                                    image_url = 'https://cnc1.ru' + image_url
+                            
+                            product_data["image_url"] = image_url
+                            image_found = True
+                            print(f"   ✅ Изображение (img): {image_url}")
+                            break
+                    except:
+                        continue
+            
+            if not image_found:
+                print("   ❌ Изображение не найдено")
+                
+        except Exception as e:
+            print(f"   ❌ Ошибка извлечения изображения: {e}")
+        
+        # Извлекаем цену из .price.font-bold.font_mxs
+        try:
+            price_found = False
+            price_selectors = [
+                ".price.font-bold.font_mxs",
+                ".price.font-bold",
+                ".price_detail",
+                ".cost.font-bold",
+                "[data-currency='RUB']",
+                ".price"
+            ]
+            
+            for selector in price_selectors:
+                try:
+                    price_elem = driver.find_element(By.CSS_SELECTOR, selector)
+                    price_text = price_elem.text.strip()
+                    
+                    if price_text and any(char.isdigit() for char in price_text):
+                        product_data["price"] = price_text
+                        price_found = True
+                        print(f"   ✅ Цена найдена: {price_text}")
+                        break
+                except:
+                    continue
+            
+            # Если обычной цены нет, ищем предзаказную
+            if not price_found:
+                preorder_selectors = [
+                    ".preorder_button",
+                    "[data-name*='preorder']",
+                    ".btn[href*='order']",
+                    ".to-order",
+                    ".order-button"
+                ]
+                
+                for selector in preorder_selectors:
+                    try:
+                        preorder_elem = driver.find_element(By.CSS_SELECTOR, selector)
+                        preorder_text = preorder_elem.text.strip()
+                        if preorder_text:
+                            product_data["preorder_price"] = preorder_text
+                            product_data["is_preorder"] = True
+                            print(f"   ✅ Предзаказная цена: {preorder_text}")
+                            break
+                    except:
+                        continue
+            
+            if not price_found and not product_data["preorder_price"]:
+                print("   ❌ Цена не найдена")
+                
+        except Exception as e:
+            print(f"   ❌ Ошибка извлечения цены: {e}")
+        
+        # Извлекаем характеристики товара
+        try:
+            characteristics_table = driver.find_elements(By.CSS_SELECTOR, ".characteristics table tr")
+            for row in characteristics_table:
+                try:
+                    cells = row.find_elements(By.TAG_NAME, "td")
+                    if len(cells) >= 2:
+                        key = cells[0].text.strip()
+                        value = cells[1].text.strip()
+                        if key and value:
+                            product_data["characteristics"][key] = value
+                except:
+                    continue
+        except:
+            pass
+        
+        print(f"   📦 Товар обработан: {product_data['name']}")
+        return [product_data]
+        
+    except Exception as e:
+        print(f"   ❌ Ошибка парсинга страницы товара: {e}")
+        return []
 
 def get_table_headers():
     """
@@ -946,9 +1440,53 @@ def parse_structured_products():
             main_blocks = driver.find_elements(By.CSS_SELECTOR, "div.item_block_href")
             
         if not main_blocks:
-            # Если ничего не найдено, возвращаемся к старому методу
-            print(" → Не найдены отдельные блоки, используем общий парсинг")
-            return parse_table_products()
+            # Если ничего не найдено, проверяем другие типы контента
+            print(" → Не найдены отдельные блоки, проверяем другие типы контента")
+            
+            # Проверяем, является ли это страницей отдельного товара
+            product_detail_indicators = [
+                ".product-detail-gallery__container",
+                ".product-main",
+                ".product-info",
+                "div[class*='product-detail']",
+                "h1[itemprop='name']"
+            ]
+            
+            is_single_product = False
+            for indicator in product_detail_indicators:
+                if driver.find_elements(By.CSS_SELECTOR, indicator):
+                    is_single_product = True
+                    print(f" → Обнаружена страница отдельного товара (индикатор: {indicator})")
+                    break
+            
+            if is_single_product:
+                # Парсим отдельный товар и возвращаем в формате structured_products
+                single_product_data = parse_single_product_page()
+                if single_product_data:
+                    print(f" → Распарсен отдельный товар: {single_product_data[0].get('name', 'Без названия')}")
+                    return {
+                        "structured_blocks": [{
+                            "block_title": "Отдельный товар",
+                            "block_image": single_product_data[0].get('image_url', ''),
+                            "table_headers": [],
+                            "products": single_product_data
+                        }]
+                    }
+            
+            # Проверяем наличие товаров в новой структуре
+            list_items = driver.find_elements(By.CSS_SELECTOR, "div.list_item.item_info.catalog-adaptive")
+            if list_items:
+                print(f" → Найдены товары в новой структуре ({len(list_items)}), используем parse_custom_list")
+                return parse_custom_list()
+            
+            # Проверяем наличие старых таблиц
+            table_elements = driver.find_elements(By.CSS_SELECTOR, "tr.main_item_wrapper")
+            if table_elements:
+                print(f" → Найдена таблица товаров ({len(table_elements)} строк), используем parse_table_products")
+                return parse_table_products()
+            
+            print(" → Нет товаров для парсинга")
+            return {"products": [], "table_headers": []}
             
         print(f" → Найдено блоков товаров: {len(main_blocks)}")
         
@@ -1334,15 +1872,96 @@ def parse_grandchildren():
         print(f" Нет под-подкатегорий или ошибка: {e}")
         return []
 
+def parse_sub_subcategories():
+    """
+    Парсит под-под-подкатегории (4-й уровень вложенности)
+    Ищет ссылки в catalog_section_list count_section_list_6 row items margin0 flexbox type_sections_4
+    """
+    try:
+        # Селекторы для поиска дополнительных подкатегорий
+        section_selectors = [
+            ".catalog_section_list.count_section_list_6.row.items.margin0.flexbox.type_sections_4 a",
+            ".catalog_section_list a.item_block_href",
+            ".count_section_list_6 a",
+            ".type_sections_4 a.item_block_href",
+            ".catalog_section_list a"
+        ]
+        
+        sub_subcategories = []
+        
+        for selector in section_selectors:
+            try:
+                links = driver.find_elements(By.CSS_SELECTOR, selector)
+                if links:
+                    print(f"🔍 Найдены под-под-подкатегории с селектором: {selector}")
+                    
+                    for link in links:
+                        try:
+                            # Пытаемся извлечь название
+                            name = None
+                            name_selectors = [
+                                "span.font_md",
+                                ".section_name",
+                                "span",
+                                ".name"
+                            ]
+                            
+                            for name_sel in name_selectors:
+                                try:
+                                    name_elem = link.find_element(By.CSS_SELECTOR, name_sel)
+                                    name = name_elem.text.strip()
+                                    if name:
+                                        break
+                                except:
+                                    continue
+                            
+                            # Если название не найдено, берем текст ссылки
+                            if not name:
+                                name = link.text.strip()
+                            
+                            url = link.get_attribute('href')
+                            
+                            if name and url and '/catalog/' in url:
+                                sub_subcategories.append({
+                                    "name": name,
+                                    "url": url
+                                })
+                                
+                        except Exception as e:
+                            continue
+                    
+                    if sub_subcategories:
+                        break
+                        
+            except Exception as e:
+                continue
+        
+        # Удаляем дубликаты
+        unique_subs = []
+        seen_urls = set()
+        for sub in sub_subcategories:
+            if sub['url'] not in seen_urls:
+                unique_subs.append(sub)
+                seen_urls.add(sub['url'])
+        
+        print(f"🎯 Найдено уникальных под-под-подкатегорий: {len(unique_subs)}")
+        return unique_subs
+
+    except Exception as e:
+        print(f"❌ Ошибка парсинга под-под-подкатегорий: {e}")
+        return []
+
 # === Ввод и запуск драйвера ===
 print("Выберите режим работы:")
 print("1. Полный парсинг с сохранением в Excel 📊")
 print("2. Тест таблицы товаров (structured_products)")
 print("3. Тест списка товаров (custom_list)")
-print("4. Исправить существующие CSV файлы для Excel 🔧")
-print("5. Создать консолидированный Excel из CSV файлов 📊")
+print("4. Тест страницы отдельного товара (product-detail) 🆕")
+print("5. Тест парсинга под-под-подкатегорий 🔗")
+print("6. Исправить существующие CSV файлы для Excel 🔧")
+print("7. Создать консолидированный Excel из CSV файлов 📊")
 
-mode_choice = input("Введите номер режима (1-5) или нажмите Enter для полного парсинга: ").strip()
+mode_choice = input("Введите номер режима (1-7) или нажмите Enter для полного парсинга: ").strip()
 
 chrome_options = Options()
 chrome_options.add_argument("--no-sandbox")
@@ -1414,19 +2033,113 @@ elif mode_choice == "3":
             print(f"Предзаказная цена: {product['preorder_price']}")
         else:
             print("Цена: не найдена")
-            
-        if product.get('is_preorder'):
-            print("Статус: предзаказ")
-        else:
-            print("Статус: в наличии")
 
 elif mode_choice == "4":
+    # Режим теста страницы отдельного товара
+    driver = webdriver.Chrome(options=chrome_options)
+    test_url = input("Введите URL страницы товара для тестирования: ")
+    print(f"\n🧪 ТЕСТ СТРАНИЦЫ ТОВАРА")
+    print(f"→ Переход на: {test_url}")
+    driver.get(test_url)
+    time.sleep(3)
+
+    # Прямо вызываем parse_single_product_page
+    result = parse_single_product_page()
+    
+    if result:
+        product = result[0]
+        print(f"\n✅ РЕЗУЛЬТАТ ТЕСТА СТРАНИЦЫ ТОВАРА:")
+        print(f"─" * 50)
+        print(f"📦 Название: {product['name']}")
+        print(f"🔗 URL: {product['url']}")
+        
+        if product.get('image_url'):
+            print(f"🖼️ Изображение: ✅ {product['image_url']}")
+        else:
+            print(f"🖼️ Изображение: ❌ не найдено")
+            
+        if product.get('price'):
+            print(f"💰 Цена: ✅ {product['price']}")
+        elif product.get('preorder_price'):
+            print(f"📋 Предзаказная цена: ✅ {product['preorder_price']}")
+        else:
+            print(f"💰 Цена: ❌ не найдена")
+            
+        if product.get('characteristics'):
+            print(f"📋 Характеристики: найдено {len(product['characteristics'])}")
+            for key, value in list(product['characteristics'].items())[:5]:
+                print(f"   • {key}: {value}")
+        else:
+            print(f"📋 Характеристики: не найдены")
+    else:
+        print("\n❌ Не удалось распарсить страницу товара")
+
+elif mode_choice == "5":
+    # Режим теста под-под-подкатегорий
+    driver = webdriver.Chrome(options=chrome_options)
+    test_url = input("Введите URL страницы с под-под-подкатегориями: ")
+    print(f"\n🧪 ТЕСТ ПАРСИНГА ПОД-ПОД-ПОДКАТЕГОРИЙ")
+    print(f"→ Переход на: {test_url}")
+    driver.get(test_url)
+    time.sleep(3)
+
+    # Прямо вызываем parse_sub_subcategories
+    result = parse_sub_subcategories()
+    
+    if result:
+        print(f"\n✅ РЕЗУЛЬТАТ ТЕСТА ПОД-ПОД-ПОДКАТЕГОРИЙ:")
+        print(f"─" * 60)
+        print(f"🔗 Найдено: {len(result)} под-под-подкатегорий")
+        
+        for i, sub_sub in enumerate(result):
+            print(f"\n📂 {i+1}. {sub_sub['name']}")
+            print(f"   🔗 URL: {sub_sub['url']}")
+            
+        print(f"\n🎯 Теперь можно протестировать парсинг товаров из каждой:")
+        choice = input("Хотите протестировать одну из них? (введите номер 1-{} или Enter для пропуска): ".format(len(result))).strip()
+        
+        if choice.isdigit() and 1 <= int(choice) <= len(result):
+            selected = result[int(choice) - 1]
+            print(f"\n🔍 Тестируем парсинг товаров из: {selected['name']}")
+            driver.get(selected['url'])
+            time.sleep(3)
+            
+            # Парсим товары
+            products_result = parse_structured_products()
+            
+            if isinstance(products_result, dict) and "structured_blocks" in products_result:
+                blocks = products_result["blocks"]
+                total_products = sum(len(block.get("products", [])) for block in blocks)
+                print(f"📦 Найдено {len(blocks)} блоков с {total_products} товарами")
+                
+                for i, block in enumerate(blocks[:3]):  # Показываем первые 3 блока
+                    block_products = block.get("products", [])
+                    print(f"   Блок {i+1}: {block['block_title']} ({len(block_products)} товаров)")
+                    
+            elif isinstance(products_result, dict) and "products" in products_result:
+                products = products_result["products"]
+                print(f"📦 Найдено {len(products)} товаров")
+                for prod in products[:3]:  # Показываем первые 3 товара
+                    print(f"   • {prod['name']}")
+                    
+            else:
+                print(f"📦 Найдено {len(products_result)} товаров")
+                for prod in products_result[:3]:  # Показываем первые 3 товара
+                    print(f"   • {prod['name']}")
+    else:
+        print("\n❌ Под-под-подкатегории не найдены")
+        print("💡 Возможные причины:")
+        print("   • Страница не содержит дополнительных подкатегорий")
+        print("   • Изменилась структура CSS")
+        print("   • Ошибка загрузки страницы")
+
+elif mode_choice == "6":
     # Режим исправления CSV файлов
     fix_existing_csv_files()
     create_excel_compatible_csv() # Добавляем вызов для создания Excel-совместимых файлов
     exit()
 
-elif mode_choice == "5":
+elif mode_choice == "7":
     # Режим создания консолидированного Excel из CSV
     print("\n📊 СОЗДАНИЕ КОНСОЛИДИРОВАННОГО EXCEL ФАЙЛА")
     
@@ -1493,18 +2206,35 @@ else:
             print(f" Ошибка при подготовке категории: {e}")
 
     # === Шаг 2: Переход и сбор "внуков" и товаров ===
-    for cat_data in categories_data:
+    parsing_state["start_time"] = datetime.now()
+    parsing_state["total_categories"] = len(categories_data)
+    
+    for cat_index, cat_data in enumerate(categories_data):
         cat_name = cat_data["name"]
-        print(f"\n Обработка категории: {cat_name}")
+        print(f"\n🏷️ Обработка категории: {cat_name} ({cat_index + 1}/{len(categories_data)})")
         
-        for sub in cat_data["subcategories"]:
+        # Перезапускаем браузер каждые 5 категорий для предотвращения проблем с памятью
+        if cat_index > 0 and cat_index % 5 == 0:
+            print(f"🔄 Профилактический перезапуск браузера после {cat_index} категорий")
+            restart_browser()
+            time.sleep(3)
+        
+        for sub_index, sub in enumerate(cat_data["subcategories"]):
             try:
                 sub_name = sub["name"]
                 sub_url = sub["url"]
-                print(f"  → Переход: {sub_name} → {sub_url}")
+                print(f"  🔍 Переход: {sub_name} ({sub_index + 1}/{len(cat_data['subcategories'])})")
                 
-                driver.get(sub_url)
-                items = get_products()
+                # Обновляем прогресс
+                update_parsing_progress(cat_index, sub_index, len(categories_data))
+                
+                # Безопасный переход на страницу
+                if not safe_get_page(sub_url):
+                    print(f"  ❌ Пропускаем {sub_name} - не удалось загрузить страницу")
+                    continue
+                
+                # Безопасный парсинг с повторными попытками
+                items = safe_parse_with_retry(get_products, f"{cat_name} -> {sub_name}")
                 
                 sub["products"] = []
                 sub["grandchildren"] = []
@@ -1534,35 +2264,113 @@ else:
                     if "article" not in items[0]:
                         sub["grandchildren"] = items
 
-                        for grand in items:
+                        for grand_index, grand in enumerate(items):
                             try:
-                                print(f"      → Парсим товары из под-подкатегории: {grand['name']} → {grand['url']}")
-                                driver.get(grand["url"])
-                                time.sleep(1.5)
-                                grand_result = parse_structured_products()
+                                print(f"      🔍 Парсим под-подкатегорию: {grand['name']} ({grand_index + 1}/{len(items)})")
+                                
+                                # Безопасный переход на страницу под-подкатегории
+                                if not safe_get_page(grand["url"]):
+                                    print(f"      ❌ Пропускаем {grand['name']} - не удалось загрузить страницу")
+                                    continue
+                                
+                                # Проверяем наличие под-под-подкатегорий
+                                sub_subcategories = safe_parse_with_retry(
+                                    parse_sub_subcategories, 
+                                    f"под-под-подкатегории для {grand['name']}"
+                                )
+                                
+                                if sub_subcategories:
+                                    print(f"        🔗 Найдено {len(sub_subcategories)} под-под-подкатегорий")
+                                    grand["sub_subcategories"] = sub_subcategories
+                                    
+                                    # Парсим каждую под-под-подкатегорию
+                                    for sub_sub_index, sub_sub in enumerate(sub_subcategories):
+                                        try:
+                                            print(f"        🔍 Парсим под-под-подкатегорию: {sub_sub['name']} ({sub_sub_index + 1}/{len(sub_subcategories)})")
+                                            
+                                            # Безопасный переход на страницу под-под-подкатегории
+                                            if not safe_get_page(sub_sub["url"]):
+                                                print(f"        ❌ Пропускаем {sub_sub['name']} - не удалось загрузить страницу")
+                                                continue
+                                            
+                                            # Парсим товары из под-под-подкатегории
+                                            sub_sub_result = safe_parse_with_retry(
+                                                parse_structured_products, 
+                                                f"{cat_name} -> {sub_name} -> {grand['name']} -> {sub_sub['name']}"
+                                            )
+                                            
+                                            if isinstance(sub_sub_result, dict) and "structured_blocks" in sub_sub_result:
+                                                # Добавляем в Excel накопитель
+                                                add_to_excel_collector(sub_sub_result["blocks"], cat_name, f"{sub_name}_{grand['name']}_{sub_sub['name']}", "structured_blocks")
+                                                
+                                                sub_sub["product_blocks"] = sub_sub_result["blocks"]
+                                                # Для обратной совместимости
+                                                all_products = []
+                                                for block in sub_sub_result["blocks"]:
+                                                    all_products.extend(block.get("products", []))
+                                                sub_sub["products"] = all_products
+                                                
+                                            elif isinstance(sub_sub_result, dict) and "products" in sub_sub_result:
+                                                # Добавляем в Excel накопитель
+                                                add_to_excel_collector(sub_sub_result["products"], cat_name, f"{sub_name}_{grand['name']}_{sub_sub['name']}", "regular_products")
+                                                
+                                                sub_sub["products"] = sub_sub_result["products"]
+                                                sub_sub["table_headers"] = sub_sub_result.get("table_headers", [])
+                                            else:
+                                                # Добавляем в Excel накопитель (если это список товаров)
+                                                if sub_sub_result:
+                                                    add_to_excel_collector(sub_sub_result, cat_name, f"{sub_name}_{grand['name']}_{sub_sub['name']}", "regular_products")
+                                                
+                                                sub_sub["products"] = sub_sub_result or []
+                                                sub_sub["table_headers"] = []
+                                                
+                                        except Exception as e:
+                                            print(f"        ❌ Ошибка при парсинге {sub_sub['name']}: {e}")
+                                            sub_sub["products"] = []
+                                            sub_sub["table_headers"] = []
+                                    
+                                    # Если есть под-под-подкатегории, не парсим основную страницу
+                                    grand["products"] = []
+                                    grand["table_headers"] = []
+                                    continue
+                                
+                                # Если нет под-под-подкатегорий, парсим обычным способом
+                                grand_result = safe_parse_with_retry(
+                                    parse_structured_products, 
+                                    f"{cat_name} -> {sub_name} -> {grand['name']}"
+                                )
+                                
+                                print(f"        📋 Результат парсинга: тип={type(grand_result)}, ключи={list(grand_result.keys()) if isinstance(grand_result, dict) else 'не словарь'}")
                                 
                                 if isinstance(grand_result, dict) and "structured_blocks" in grand_result:
                                     # Добавляем в Excel накопитель
-                                    add_to_excel_collector(grand_result["blocks"], cat_name, f"{sub_name}_{grand['name']}", "structured_blocks")
+                                    blocks = grand_result["structured_blocks"]
+                                    add_to_excel_collector(blocks, cat_name, f"{sub_name}_{grand['name']}", "structured_blocks")
                                     
-                                    grand["product_blocks"] = grand_result["blocks"]
+                                    grand["product_blocks"] = blocks
                                     # Для обратной совместимости
                                     all_products = []
-                                    for block in grand_result["blocks"]:
+                                    for block in blocks:
                                         all_products.extend(block.get("products", []))
                                     grand["products"] = all_products
+                                    print(f"        ✅ Обработано как structured_blocks: {len(blocks)} блоков, {len(all_products)} товаров")
                                 elif isinstance(grand_result, dict) and "products" in grand_result:
                                     # Добавляем в Excel накопитель
-                                    add_to_excel_collector(grand_result["products"], cat_name, f"{sub_name}_{grand['name']}", "regular_products")
+                                    products = grand_result["products"]
+                                    add_to_excel_collector(products, cat_name, f"{sub_name}_{grand['name']}", "regular_products")
                                     
-                                    grand["products"] = grand_result["products"]
+                                    grand["products"] = products
                                     grand["table_headers"] = grand_result.get("table_headers", [])
+                                    print(f"        ✅ Обработано как products: {len(products)} товаров")
                                 else:
                                     # Добавляем в Excel накопитель (если это список товаров)
                                     if grand_result:
                                         add_to_excel_collector(grand_result, cat_name, f"{sub_name}_{grand['name']}", "regular_products")
+                                        print(f"        ✅ Обработано как список: {len(grand_result) if isinstance(grand_result, list) else 'не список'} товаров")
+                                    else:
+                                        print(f"        ❌ Пустой результат")
                                     
-                                    grand["products"] = grand_result
+                                    grand["products"] = grand_result or []
                                     grand["table_headers"] = []
                                     
                             except Exception as e:
@@ -1651,6 +2459,22 @@ else:
                 print(f"  ├── {sub['name']} (нет товаров)")
         print()
 
+    # === Финальное сохранение и статистика ===
+    print("\n" + "="*60)
+    print("ЗАВЕРШЕНИЕ ПАРСИНГА")
+    print("="*60)
+    
+    # Сохраняем финальный прогресс
+    save_progress_checkpoint()
+    
+    # Показываем статистику
+    end_time = datetime.now()
+    total_time = end_time - parsing_state["start_time"] if parsing_state["start_time"] else "неизвестно"
+    
+    print(f"⏱️ Время парсинга: {total_time}")
+    print(f"📊 Обработано элементов: {parsing_state['processed_items']}")
+    print(f"📦 Собрано товаров: {len(excel_data_collector['all_products'])}")
+    
     # === Создание Excel файла ===
     print("\n" + "="*60)
     print("СОЗДАНИЕ EXCEL ФАЙЛА")
@@ -1659,12 +2483,14 @@ else:
     excel_file = save_consolidated_excel()
     
     if excel_file:
-        print(f"\n🎉 Парсинг завершен!")
+        print(f"\n🎉 Парсинг успешно завершен!")
         print(f"📊 Все данные сохранены в Excel файл: {os.path.basename(excel_file)}")
         print(f"📁 Файл находится в папке: results/")
+        print(f"⏱️ Общее время работы: {total_time}")
     else:
         print(f"\n⚠️ Excel файл не был создан")
-        print(f"📁 Проверьте CSV файлы в папке 'results/'")
+        print(f"📁 Проверьте промежуточные файлы в папке 'results/'")
+        print(f"💾 Данные сохранены в checkpoint файлах")
 
 # === Завершение ===
 driver.quit() 
