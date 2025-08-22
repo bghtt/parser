@@ -23,6 +23,11 @@ excel_data_collector = {
     "parsing_log": []  # Лог парсинга
 }
 
+# Новый структурированный накопитель данных по категориям
+category_data_collector = {}
+
+
+
 # Глобальные переменные для восстановления
 parsing_state = {
     "current_category": 0,
@@ -1830,6 +1835,18 @@ def parse_table_products():
                 "image_url": image_url,
                 **props
             }
+            
+            # Логируем найденную информацию о товаре
+            print(f"     → Товар: {name}")
+            if image_url:
+                print(f"       ├── Изображение: ✅")
+            else:
+                print(f"       ├── Изображение: ❌")
+            if article and article != "Не указан":
+                print(f"       ├── Артикул: {article}")
+            if url:
+                print(f"       └── Ссылка: ✅")
+                
             products.append(product_data)
 
         except Exception as e:
@@ -1960,8 +1977,9 @@ print("4. Тест страницы отдельного товара (product-d
 print("5. Тест парсинга под-под-подкатегорий 🔗")
 print("6. Исправить существующие CSV файлы для Excel 🔧")
 print("7. Создать консолидированный Excel из CSV файлов 📊")
+print("8. Тестовый парсинг одной категории 🧪")
 
-mode_choice = input("Введите номер режима (1-7) или нажмите Enter для полного парсинга: ").strip()
+mode_choice = input("Введите номер режима (1-8) или нажмите Enter для полного парсинга: ").strip()
 
 chrome_options = Options()
 chrome_options.add_argument("--no-sandbox")
@@ -2178,6 +2196,157 @@ elif mode_choice == "7":
     
     exit()
 
+elif mode_choice == "8":
+    # Тестовый режим: парсинг одной категории
+    driver = webdriver.Chrome(options=chrome_options)
+    url = input("Введите URL главной страницы: ")
+    driver.get(url)
+    time.sleep(2)
+
+    print("\n🧪 ТЕСТОВЫЙ РЕЖИМ: ПАРСИНГ ОДНОЙ КАТЕГОРИИ")
+    print("="*60)
+
+    # Получаем список категорий
+    main_categories = driver.find_elements(By.CSS_SELECTOR, 'a.icons_fa.parent.rounded2.bordered')
+    print(f'📂 Найдено категорий: {len(main_categories)}')
+    
+    # Показываем список категорий для выбора
+    categories_list = []
+    for i, main_cat in enumerate(main_categories):
+        try:
+            cat_name = get_category_name(main_cat)
+            categories_list.append((cat_name, main_cat))
+            print(f"{i+1}. {cat_name}")
+        except Exception as e:
+            print(f"{i+1}. Ошибка получения названия категории: {e}")
+            
+    # Выбор категории
+    try:
+        choice = input(f"\nВыберите категорию для тестирования (1-{len(categories_list)}): ").strip()
+        category_index = int(choice) - 1
+        
+        if 0 <= category_index < len(categories_list):
+            selected_category_name, selected_category_element = categories_list[category_index]
+            print(f"\n🎯 Выбрана категория: {selected_category_name}")
+            
+            # Получаем подкатегории выбранной категории
+            subcategories = get_subcategories(selected_category_element)
+            print(f"📁 Найдено подкатегорий: {len(subcategories)}")
+            
+            # Очищаем накопитель данных
+            clear_category_collector()
+            
+            # Парсим выбранную категорию
+            parsing_state["start_time"] = datetime.now()
+            
+            for sub_index, sub in enumerate(subcategories):
+                try:
+                    sub_name = sub["name"]
+                    sub_url = sub["url"]
+                    print(f"\n🔍 Обработка подкатегории: {sub_name} ({sub_index + 1}/{len(subcategories)})")
+                    
+                    # Безопасный переход на страницу
+                    if not safe_get_page(sub_url):
+                        print(f"  ❌ Пропускаем {sub_name} - не удалось загрузить страницу")
+                        continue
+                    
+                    # Безопасный парсинг
+                    items = safe_parse_with_retry(get_products, f"{selected_category_name} -> {sub_name}")
+                    
+                    if isinstance(items, dict) and "structured_blocks" in items:
+                        # Обрабатываем структурированные блоки
+                        for block in items["blocks"]:
+                            block_info = {
+                                "block_title": block.get("block_title", ""),
+                                "block_image": block.get("block_image", ""),
+                                "table_headers": block.get("table_headers", [])
+                            }
+                            add_to_category_collector(
+                                selected_category_name, 
+                                sub_name, 
+                                block.get("products", []), 
+                                block_info
+                            )
+                        print(f"  ✅ Обработано {len(items['blocks'])} блоков")
+                        
+                    elif isinstance(items, dict) and "products" in items:
+                        # Обычные товары с заголовками
+                        add_to_category_collector(selected_category_name, sub_name, items["products"])
+                        print(f"  ✅ Обработано {len(items['products'])} товаров")
+                        
+                    elif items and isinstance(items[0], dict) and "name" in items[0]:
+                        if "article" not in items[0]:
+                            # Это подподкатегории
+                            print(f"  🔗 Найдено {len(items)} подподкатегорий")
+                            for grand in items[:3]:  # Ограничиваем тестирование 3 подподкатегориями
+                                try:
+                                    print(f"    🔍 Парсим подподкатегорию: {grand['name']}")
+                                    
+                                    if not safe_get_page(grand["url"]):
+                                        continue
+                                    
+                                    grand_result = safe_parse_with_retry(
+                                        parse_structured_products, 
+                                        f"{selected_category_name} -> {sub_name} -> {grand['name']}"
+                                    )
+                                    
+                                    if isinstance(grand_result, dict) and "structured_blocks" in grand_result:
+                                        for block in grand_result["blocks"]:
+                                            block_info = {
+                                                "block_title": block.get("block_title", ""),
+                                                "block_image": block.get("block_image", ""),
+                                                "table_headers": block.get("table_headers", [])
+                                            }
+                                            add_to_category_collector(
+                                                selected_category_name, 
+                                                [sub_name, grand['name']], 
+                                                block.get("products", []), 
+                                                block_info
+                                            )
+                                        print(f"    ✅ Обработано {len(grand_result['blocks'])} блоков")
+                                        
+                                except Exception as e:
+                                    print(f"    ❌ Ошибка обработки {grand['name']}: {e}")
+                        else:
+                            # Это товары custom_list
+                            add_to_category_collector(selected_category_name, sub_name, items)
+                            print(f"  ✅ Обработано {len(items)} товаров (custom_list)")
+                    else:
+                        print(f"  ⚠️ Неопознанный формат данных или пустой результат")
+                        
+                except Exception as e:
+                    print(f"  ❌ Ошибка обработки подкатегории {sub_name}: {e}")
+            
+            # Создаем Excel файл
+            print(f"\n📊 СОЗДАНИЕ ТЕСТОВОГО EXCEL ФАЙЛА")
+            print("="*50)
+            
+            excel_file = save_category_based_excel()
+            
+            if excel_file:
+                print(f"\n🎉 Тестовый Excel файл создан: {os.path.basename(excel_file)}")
+                print(f"📁 Файл находится в папке: results/")
+                
+                # Показываем статистику
+                if selected_category_name in category_data_collector:
+                    stats = category_data_collector[selected_category_name]["statistics"]
+                    print(f"\n📈 СТАТИСТИКА ПО КАТЕГОРИИ '{selected_category_name}':")
+                    print(f"   📦 Всего товаров: {stats['total_products']}")
+                    print(f"   📁 Подкатегорий: {stats['total_subcategories']}")
+                    print(f"   🗂️ Блоков товаров: {stats['total_blocks']}")
+            else:
+                print(f"\n❌ Ошибка создания Excel файла")
+            
+        else:
+            print("❌ Неверный номер категории")
+            
+    except ValueError:
+        print("❌ Введите корректный номер категории")
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+    
+    exit()
+
 else:
     # Основной режим: парсинг всей иерархии
     driver = webdriver.Chrome(options=chrome_options)
@@ -2243,11 +2412,18 @@ else:
                 
                 # Если результат - это структурированные блоки
                 if isinstance(items, dict) and "structured_blocks" in items:
-                    # Добавляем в Excel накопитель
-                    add_to_excel_collector(items["blocks"], cat_name, sub_name, "structured_blocks")
+                    # Добавляем в новый накопитель данных
+                    for block in items["blocks"]:
+                        block_info = {
+                            "block_title": block.get("block_title", ""),
+                            "block_image": block.get("block_image", ""),
+                            "table_headers": block.get("table_headers", [])
+                        }
+                        add_to_category_collector(cat_name, sub_name, block.get("products", []), block_info)
                     
+                    # Для обратной совместимости
+                    add_to_excel_collector(items["blocks"], cat_name, sub_name, "structured_blocks")
                     sub["product_blocks"] = items["blocks"]
-                    # Для обратной совместимости, также заполняем products
                     all_products = []
                     for block in items["blocks"]:
                         all_products.extend(block.get("products", []))
@@ -2255,9 +2431,11 @@ else:
                     
                 # Если результат - это словарь с заголовками и товарами
                 elif isinstance(items, dict) and "products" in items:
-                    # Добавляем в Excel накопитель
-                    add_to_excel_collector(items["products"], cat_name, sub_name, "regular_products")
+                    # Добавляем в новый накопитель данных
+                    add_to_category_collector(cat_name, sub_name, items["products"])
                     
+                    # Для обратной совместимости
+                    add_to_excel_collector(items["products"], cat_name, sub_name, "regular_products")
                     sub["products"] = items["products"]
                     sub["table_headers"] = items.get("table_headers", [])
                 elif items and isinstance(items[0], dict) and "name" in items[0] and "url" in items[0]:
@@ -2300,25 +2478,35 @@ else:
                                             )
                                             
                                             if isinstance(sub_sub_result, dict) and "structured_blocks" in sub_sub_result:
-                                                # Добавляем в Excel накопитель
-                                                add_to_excel_collector(sub_sub_result["blocks"], cat_name, f"{sub_name}_{grand['name']}_{sub_sub['name']}", "structured_blocks")
+                                                # Добавляем в новый накопитель данных
+                                                for block in sub_sub_result["blocks"]:
+                                                    block_info = {
+                                                        "block_title": block.get("block_title", ""),
+                                                        "block_image": block.get("block_image", ""),
+                                                        "table_headers": block.get("table_headers", [])
+                                                    }
+                                                    add_to_category_collector(cat_name, [sub_name, grand['name'], sub_sub['name']], block.get("products", []), block_info)
                                                 
-                                                sub_sub["product_blocks"] = sub_sub_result["blocks"]
                                                 # Для обратной совместимости
+                                                add_to_excel_collector(sub_sub_result["blocks"], cat_name, f"{sub_name}_{grand['name']}_{sub_sub['name']}", "structured_blocks")
+                                                sub_sub["product_blocks"] = sub_sub_result["blocks"]
                                                 all_products = []
                                                 for block in sub_sub_result["blocks"]:
                                                     all_products.extend(block.get("products", []))
                                                 sub_sub["products"] = all_products
                                                 
                                             elif isinstance(sub_sub_result, dict) and "products" in sub_sub_result:
-                                                # Добавляем в Excel накопитель
-                                                add_to_excel_collector(sub_sub_result["products"], cat_name, f"{sub_name}_{grand['name']}_{sub_sub['name']}", "regular_products")
+                                                # Добавляем в новый накопитель данных
+                                                add_to_category_collector(cat_name, [sub_name, grand['name'], sub_sub['name']], sub_sub_result["products"])
                                                 
+                                                # Для обратной совместимости
+                                                add_to_excel_collector(sub_sub_result["products"], cat_name, f"{sub_name}_{grand['name']}_{sub_sub['name']}", "regular_products")
                                                 sub_sub["products"] = sub_sub_result["products"]
                                                 sub_sub["table_headers"] = sub_sub_result.get("table_headers", [])
                                             else:
-                                                # Добавляем в Excel накопитель (если это список товаров)
+                                                # Добавляем в новый накопитель данных (если это список товаров)
                                                 if sub_sub_result:
+                                                    add_to_category_collector(cat_name, [sub_name, grand['name'], sub_sub['name']], sub_sub_result)
                                                     add_to_excel_collector(sub_sub_result, cat_name, f"{sub_name}_{grand['name']}_{sub_sub['name']}", "regular_products")
                                                 
                                                 sub_sub["products"] = sub_sub_result or []
@@ -2343,28 +2531,38 @@ else:
                                 print(f"        📋 Результат парсинга: тип={type(grand_result)}, ключи={list(grand_result.keys()) if isinstance(grand_result, dict) else 'не словарь'}")
                                 
                                 if isinstance(grand_result, dict) and "structured_blocks" in grand_result:
-                                    # Добавляем в Excel накопитель
-                                    blocks = grand_result["structured_blocks"]
-                                    add_to_excel_collector(blocks, cat_name, f"{sub_name}_{grand['name']}", "structured_blocks")
+                                    # Добавляем в новый накопитель данных
+                                    blocks = grand_result["blocks"]
+                                    for block in blocks:
+                                        block_info = {
+                                            "block_title": block.get("block_title", ""),
+                                            "block_image": block.get("block_image", ""),
+                                            "table_headers": block.get("table_headers", [])
+                                        }
+                                        add_to_category_collector(cat_name, [sub_name, grand['name']], block.get("products", []), block_info)
                                     
-                                    grand["product_blocks"] = blocks
                                     # Для обратной совместимости
+                                    add_to_excel_collector(blocks, cat_name, f"{sub_name}_{grand['name']}", "structured_blocks")
+                                    grand["product_blocks"] = blocks
                                     all_products = []
                                     for block in blocks:
                                         all_products.extend(block.get("products", []))
                                     grand["products"] = all_products
                                     print(f"        ✅ Обработано как structured_blocks: {len(blocks)} блоков, {len(all_products)} товаров")
                                 elif isinstance(grand_result, dict) and "products" in grand_result:
-                                    # Добавляем в Excel накопитель
+                                    # Добавляем в новый накопитель данных
                                     products = grand_result["products"]
-                                    add_to_excel_collector(products, cat_name, f"{sub_name}_{grand['name']}", "regular_products")
+                                    add_to_category_collector(cat_name, [sub_name, grand['name']], products)
                                     
+                                    # Для обратной совместимости
+                                    add_to_excel_collector(products, cat_name, f"{sub_name}_{grand['name']}", "regular_products")
                                     grand["products"] = products
                                     grand["table_headers"] = grand_result.get("table_headers", [])
                                     print(f"        ✅ Обработано как products: {len(products)} товаров")
                                 else:
-                                    # Добавляем в Excel накопитель (если это список товаров)
+                                    # Добавляем в новый накопитель данных (если это список товаров)
                                     if grand_result:
+                                        add_to_category_collector(cat_name, [sub_name, grand['name']], grand_result)
                                         add_to_excel_collector(grand_result, cat_name, f"{sub_name}_{grand['name']}", "regular_products")
                                         print(f"        ✅ Обработано как список: {len(grand_result) if isinstance(grand_result, list) else 'не список'} товаров")
                                     else:
@@ -2380,6 +2578,7 @@ else:
 
                     else:
                         # Это товары custom_list
+                        add_to_category_collector(cat_name, sub_name, items)
                         add_to_excel_collector(items, cat_name, sub_name, "custom_list")
                         sub["products"] = items
                 else:
@@ -2475,22 +2674,270 @@ else:
     print(f"📊 Обработано элементов: {parsing_state['processed_items']}")
     print(f"📦 Собрано товаров: {len(excel_data_collector['all_products'])}")
     
-    # === Создание Excel файла ===
+    # === Создание Excel файлов ===
     print("\n" + "="*60)
-    print("СОЗДАНИЕ EXCEL ФАЙЛА")
+    print("СОЗДАНИЕ EXCEL ФАЙЛОВ")
     print("="*60)
     
-    excel_file = save_consolidated_excel()
+    # Создаем новый структурированный Excel файл по категориям
+    category_excel_file = save_category_based_excel()
     
-    if excel_file:
+    # Создаем также старый консолидированный файл для совместимости
+    consolidated_excel_file = save_consolidated_excel()
+    
+    if category_excel_file or consolidated_excel_file:
         print(f"\n🎉 Парсинг успешно завершен!")
-        print(f"📊 Все данные сохранены в Excel файл: {os.path.basename(excel_file)}")
-        print(f"📁 Файл находится в папке: results/")
+        if category_excel_file:
+            print(f"📊 Структурированные данные по категориям: {os.path.basename(category_excel_file)}")
+        if consolidated_excel_file:
+            print(f"📊 Консолидированный файл: {os.path.basename(consolidated_excel_file)}")
+        print(f"📁 Файлы находятся в папке: results/")
         print(f"⏱️ Общее время работы: {total_time}")
+        
+        # Показываем статистику по категориям
+        if category_data_collector:
+            print(f"\n📈 ИТОГОВАЯ СТАТИСТИКА:")
+            total_products = 0
+            total_blocks = 0
+            for cat_name, cat_data in category_data_collector.items():
+                stats = cat_data["statistics"]
+                total_products += stats["total_products"]
+                total_blocks += stats["total_blocks"]
+                print(f"   📂 {cat_name}: {stats['total_products']} товаров в {stats['total_blocks']} блоках")
+            print(f"   🎯 ИТОГО: {total_products} товаров в {total_blocks} блоках по {len(category_data_collector)} категориям")
     else:
-        print(f"\n⚠️ Excel файл не был создан")
+        print(f"\n⚠️ Excel файлы не были созданы")
         print(f"📁 Проверьте промежуточные файлы в папке 'results/'")
         print(f"💾 Данные сохранены в checkpoint файлах")
 
 # === Завершение ===
 driver.quit() 
+
+def add_to_category_collector(category_name, subcategory_path, product_data, block_info=None):
+    """
+    Добавляет данные в структурированный накопитель по категориям
+    
+    Args:
+        category_name: Название основной категории
+        subcategory_path: Путь подкатегорий (список или строка)
+        product_data: Данные товара/товаров
+        block_info: Информация о блоке (заголовок, изображение, заголовки таблицы)
+    """
+    global category_data_collector
+    
+    if category_name not in category_data_collector:
+        category_data_collector[category_name] = {
+            "products": [],
+            "subcategories": {},
+            "blocks": [],
+            "statistics": {
+                "total_products": 0,
+                "total_subcategories": 0,
+                "total_blocks": 0
+            }
+        }
+    
+    # Преобразуем путь подкатегорий в строку
+    if isinstance(subcategory_path, list):
+        subcategory_key = " → ".join(subcategory_path)
+    else:
+        subcategory_key = str(subcategory_path)
+    
+    timestamp = datetime.now().isoformat()
+    
+    # Если это блок товаров (structured_blocks)
+    if block_info and isinstance(product_data, list):
+        block_data = {
+            "block_title": block_info.get("block_title", "Неизвестный блок"),
+            "block_image": block_info.get("block_image", ""),
+            "table_headers": block_info.get("table_headers", []),
+            "subcategory_path": subcategory_key,
+            "timestamp": timestamp,
+            "products": []
+        }
+        
+        for product in product_data:
+            enhanced_product = {
+                "category": category_name,
+                "subcategory_path": subcategory_key,
+                "block_title": block_info.get("block_title", ""),
+                "block_image": block_info.get("block_image", ""),
+                "name": product.get("name", ""),
+                "article": product.get("article", ""),
+                "url": product.get("url", ""),
+                "image_url": product.get("image_url", ""),
+                "timestamp": timestamp
+            }
+            
+            # Добавляем все остальные характеристики товара
+            for key, value in product.items():
+                if key not in ["name", "article", "url", "image_url"]:
+                    enhanced_product[key] = value
+            
+            block_data["products"].append(enhanced_product)
+            category_data_collector[category_name]["products"].append(enhanced_product)
+        
+        category_data_collector[category_name]["blocks"].append(block_data)
+        category_data_collector[category_name]["statistics"]["total_blocks"] += 1
+        
+    # Если это обычные товары
+    elif isinstance(product_data, list):
+        for product in product_data:
+            enhanced_product = {
+                "category": category_name,
+                "subcategory_path": subcategory_key,
+                "block_title": "",
+                "block_image": "",
+                "name": product.get("name", ""),
+                "article": product.get("article", ""),
+                "url": product.get("url", ""),
+                "image_url": product.get("image_url", ""),
+                "price": product.get("price", ""),
+                "timestamp": timestamp
+            }
+            
+            # Добавляем все остальные характеристики товара
+            for key, value in product.items():
+                if key not in ["name", "article", "url", "image_url", "price"]:
+                    enhanced_product[key] = value
+                    
+            category_data_collector[category_name]["products"].append(enhanced_product)
+    
+    # Обновляем статистику
+    if subcategory_key not in category_data_collector[category_name]["subcategories"]:
+        category_data_collector[category_name]["subcategories"][subcategory_key] = 0
+        category_data_collector[category_name]["statistics"]["total_subcategories"] += 1
+    
+    products_count = len(product_data) if isinstance(product_data, list) else 1
+    category_data_collector[category_name]["subcategories"][subcategory_key] += products_count
+    category_data_collector[category_name]["statistics"]["total_products"] += products_count
+
+def save_category_based_excel():
+    """
+    Сохраняет данные в Excel файл с отдельными листами для каждой категории
+    """
+    global category_data_collector
+    
+    if not category_data_collector:
+        print("❌ Нет данных для сохранения")
+        return None
+    
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"parsed_data_by_categories_{timestamp}.xlsx"
+        filepath = os.path.join("results", filename)
+        
+        # Создаем директорию если её нет
+        os.makedirs("results", exist_ok=True)
+        
+        print(f"📊 Создание Excel файла по категориям: {filename}")
+        print(f"   → Категорий: {len(category_data_collector)}")
+        
+        # Создаем Excel книгу
+        with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+            
+            # Создаем сводный лист
+            summary_data = []
+            total_products = 0
+            total_blocks = 0
+            
+            for cat_name, cat_data in category_data_collector.items():
+                stats = cat_data["statistics"]
+                total_products += stats["total_products"]
+                total_blocks += stats["total_blocks"]
+                
+                summary_data.append({
+                    "Категория": cat_name,
+                    "Всего товаров": stats["total_products"],
+                    "Подкатегорий": stats["total_subcategories"],
+                    "Блоков товаров": stats["total_blocks"],
+                    "Подкатегории": ", ".join(list(cat_data["subcategories"].keys())[:3]) + 
+                                  (f" и ещё {len(cat_data['subcategories']) - 3}" if len(cat_data["subcategories"]) > 3 else "")
+                })
+            
+            summary_df = pd.DataFrame(summary_data)
+            summary_df.to_excel(writer, sheet_name="📊 Сводка", index=False)
+            print(f"   ✓ Создан сводный лист ({len(summary_data)} категорий)")
+            
+            # Создаем лист для каждой категории
+            for cat_name, cat_data in category_data_collector.items():
+                if not cat_data["products"]:
+                    continue
+                
+                # Создаем DataFrame из товаров категории
+                df = pd.DataFrame(cat_data["products"])
+                
+                # Переупорядочиваем колонки: основные поля в начале
+                basic_columns = ["name", "article", "url", "image_url", "subcategory_path", "block_title", "block_image"]
+                other_columns = [col for col in df.columns if col not in basic_columns + ["category", "timestamp"]]
+                ordered_columns = [col for col in basic_columns if col in df.columns] + other_columns
+                
+                # Добавляем категорию и timestamp в конец
+                if "category" in df.columns:
+                    ordered_columns.append("category")
+                if "timestamp" in df.columns:
+                    ordered_columns.append("timestamp")
+                
+                df = df[ordered_columns]
+                
+                # Переименовываем колонки для удобства
+                column_mapping = {
+                    "name": "Название товара",
+                    "article": "Артикул",
+                    "url": "Ссылка",
+                    "image_url": "Изображение",
+                    "subcategory_path": "Путь подкатегорий",
+                    "block_title": "Название блока",
+                    "block_image": "Изображение блока",
+                    "category": "Категория",
+                    "timestamp": "Время парсинга"
+                }
+                
+                df = df.rename(columns=column_mapping)
+                
+                # Формируем название листа (ограничиваем 31 символом)
+                sheet_name = cat_name[:27] + "..." if len(cat_name) > 27 else cat_name
+                
+                # Убираем недопустимые символы из имени листа
+                invalid_chars = ['\\', '/', '*', '[', ']', ':', '?']
+                for char in invalid_chars:
+                    sheet_name = sheet_name.replace(char, '_')
+                
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+                print(f"   ✓ Создан лист '{sheet_name}' ({len(df)} товаров)")
+            
+            # Создаем лист с блоками товаров (если есть)
+            all_blocks = []
+            for cat_name, cat_data in category_data_collector.items():
+                for block in cat_data["blocks"]:
+                    block_summary = {
+                        "Категория": cat_name,
+                        "Путь подкатегорий": block["subcategory_path"],
+                        "Название блока": block["block_title"],
+                        "Изображение блока": block["block_image"],
+                        "Заголовки таблицы": ", ".join(block["table_headers"]),
+                        "Количество товаров": len(block["products"]),
+                        "Время парсинга": block["timestamp"]
+                    }
+                    all_blocks.append(block_summary)
+            
+            if all_blocks:
+                blocks_df = pd.DataFrame(all_blocks)
+                blocks_df.to_excel(writer, sheet_name="🗂️ Блоки товаров", index=False)
+                print(f"   ✓ Создан лист 'Блоки товаров' ({len(all_blocks)} блоков)")
+        
+        print(f"🎉 Excel файл успешно создан: {filepath}")
+        print(f"📁 Размер файла: {os.path.getsize(filepath) / 1024 / 1024:.2f} МБ")
+        print(f"📊 Итого: {total_products} товаров в {total_blocks} блоках")
+        
+        return filepath
+        
+    except Exception as e:
+        print(f"❌ Ошибка создания Excel файла: {e}")
+        return None
+
+def clear_category_collector():
+    """Очищает накопитель данных по категориям"""
+    global category_data_collector
+    category_data_collector = {}
+
