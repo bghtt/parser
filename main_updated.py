@@ -1336,14 +1336,13 @@ def parse_grandchildren():
 
 # === Ввод и запуск драйвера ===
 print("Выберите режим работы:")
-print("1. Полный парсинг иерархии (по умолчанию)")
-print("2. Асинхронный парсинг с сохранением в CSV 🚀")
-print("3. Тест таблицы товаров (structured_products)")
-print("4. Тест списка товаров (custom_list)")
-print("5. Исправить существующие CSV файлы для Excel 🔧")
-print("6. Создать консолидированный Excel из CSV файлов 📊")
+print("1. Полный парсинг с сохранением в Excel 📊")
+print("2. Тест таблицы товаров (structured_products)")
+print("3. Тест списка товаров (custom_list)")
+print("4. Исправить существующие CSV файлы для Excel 🔧")
+print("5. Создать консолидированный Excel из CSV файлов 📊")
 
-mode_choice = input("Введите номер режима (1-6) или нажмите Enter для полного парсинга: ").strip()
+mode_choice = input("Введите номер режима (1-5) или нажмите Enter для полного парсинга: ").strip()
 
 chrome_options = Options()
 chrome_options.add_argument("--no-sandbox")
@@ -1351,119 +1350,6 @@ chrome_options.add_argument("--disable-dev-shm-usage")
 chrome_options.add_argument("--disable-plugins")
 
 if mode_choice == "2":
-    # === АСИНХРОННЫЙ РЕЖИМ С CSV ===
-    print("\n🚀 АСИНХРОННЫЙ РЕЖИМ ПАРСИНГА")
-    print("Каждая категория будет обработана параллельно")
-    print("Результаты будут сохранены в CSV файлы в папке 'results/'")
-    
-    # Спрашиваем количество потоков
-    max_workers = input("Количество параллельных потоков (по умолчанию 3): ").strip()
-    try:
-        max_workers = int(max_workers) if max_workers else 3
-    except:
-        max_workers = 3
-    
-    url = input("Введите URL главной страницы: ")
-    
-    # Создаем один драйвер для сбора структуры категорий
-    driver = webdriver.Chrome(options=chrome_options)
-    
-    try:
-        print(f"\n→ Переход на: {url}")
-        driver.get(url)
-        time.sleep(2)
-
-        # === Шаг 1: Сбор категорий и подкатегорий ===
-        main_categories = driver.find_elements(By.CSS_SELECTOR, 'a.icons_fa.parent.rounded2.bordered')
-        print(f'📋 Найдено категорий: {len(main_categories)}')
-
-        categories_data = []
-        for main_cat in main_categories:
-            try:
-                cat_name = get_category_name(main_cat)
-                subcategories = get_subcategories(main_cat)
-                
-                categories_data.append({
-                    "name": cat_name,
-                    "subcategories": subcategories
-                })
-                print(f" ✓ Подготовлено: {cat_name} → {len(subcategories)} подкатегорий")
-                
-            except Exception as e:
-                print(f" ✗ Ошибка при подготовке категории: {e}")
-        
-        # Закрываем основной драйвер
-        driver.quit()
-        
-        # === Шаг 2: Асинхронная обработка ===
-        print(f"\n🔥 Запуск параллельной обработки {len(categories_data)} категорий в {max_workers} потоков")
-        
-        results_queue = queue.Queue()
-        
-        # Используем ThreadPoolExecutor для параллельной обработки
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Запускаем обработку каждой категории в отдельном потоке
-            futures = []
-            for category_data in categories_data:
-                future = executor.submit(process_category_async, category_data, results_queue)
-                futures.append(future)
-            
-            # Отслеживаем прогресс
-            completed = 0
-            total = len(categories_data)
-            
-            print(f"\n📊 Прогресс обработки:")
-            while completed < total:
-                try:
-                    result = results_queue.get(timeout=30)
-                    completed += 1
-                    
-                    category_name = result["category"]["name"]
-                    status = result["status"]
-                    message = result["message"]
-                    
-                    if status == "completed":
-                        print(f"✅ [{completed}/{total}] {category_name}: {message}")
-                    else:
-                        print(f"❌ [{completed}/{total}] {category_name}: {message}")
-                        
-                except queue.Empty:
-                    print("⏳ Ожидание завершения обработки...")
-                    continue
-            
-            # Дожидаемся завершения всех задач
-            for future in futures:
-                future.result()
-        
-        print(f"\n🎉 ПАРСИНГ ЗАВЕРШЕН!")
-        print(f"✅ Обработано {len(categories_data)} категорий")
-        
-        # Создаем консолидированный Excel файл
-        print(f"\n📊 Создание консолидированного Excel файла...")
-        excel_file = save_consolidated_excel()
-        
-        if excel_file:
-            print(f"📄 Результаты сохранены в единый Excel файл: {os.path.basename(excel_file)}")
-        else:
-            print(f"📁 Результаты сохранены в папке 'results/' (отдельные CSV файлы)")
-            
-            # Показываем список созданных файлов только если Excel не создался
-            if os.path.exists("results"):
-                files = os.listdir("results")
-                csv_files = [f for f in files if f.endswith('.csv')]
-                print(f"📄 Создано {len(csv_files)} CSV файлов:")
-                for f in sorted(csv_files)[:10]:  # Показываем первые 10
-                    print(f"   • {f}")
-                if len(csv_files) > 10:
-                    print(f"   ... и ещё {len(csv_files) - 10} файлов")
-                
-    except Exception as e:
-        print(f"❌ Критическая ошибка: {e}")
-    finally:
-        if 'driver' in locals():
-            driver.quit()
-
-elif mode_choice == "3":
     # Режим теста structured_products (таблицы)
     driver = webdriver.Chrome(options=chrome_options)
     test_url = input("Введите URL для теста таблиц товаров: ")
@@ -1500,7 +1386,7 @@ elif mode_choice == "3":
         for prod in result[:5]:
             print(f" • {prod['name']} (артикул: {prod.get('article', '—')})")
 
-elif mode_choice == "4":
+elif mode_choice == "3":
     # Режим теста custom_list (списки товаров)
     driver = webdriver.Chrome(options=chrome_options)
     test_url = input("Введите URL для теста списка товаров (custom_list): ")
@@ -1534,13 +1420,13 @@ elif mode_choice == "4":
         else:
             print("Статус: в наличии")
 
-elif mode_choice == "5":
+elif mode_choice == "4":
     # Режим исправления CSV файлов
     fix_existing_csv_files()
     create_excel_compatible_csv() # Добавляем вызов для создания Excel-совместимых файлов
     exit()
 
-elif mode_choice == "6":
+elif mode_choice == "5":
     # Режим создания консолидированного Excel из CSV
     print("\n📊 СОЗДАНИЕ КОНСОЛИДИРОВАННОГО EXCEL ФАЙЛА")
     
@@ -1627,6 +1513,9 @@ else:
                 
                 # Если результат - это структурированные блоки
                 if isinstance(items, dict) and "structured_blocks" in items:
+                    # Добавляем в Excel накопитель
+                    add_to_excel_collector(items["blocks"], cat_name, sub_name, "structured_blocks")
+                    
                     sub["product_blocks"] = items["blocks"]
                     # Для обратной совместимости, также заполняем products
                     all_products = []
@@ -1636,6 +1525,9 @@ else:
                     
                 # Если результат - это словарь с заголовками и товарами
                 elif isinstance(items, dict) and "products" in items:
+                    # Добавляем в Excel накопитель
+                    add_to_excel_collector(items["products"], cat_name, sub_name, "regular_products")
+                    
                     sub["products"] = items["products"]
                     sub["table_headers"] = items.get("table_headers", [])
                 elif items and isinstance(items[0], dict) and "name" in items[0] and "url" in items[0]:
@@ -1650,6 +1542,9 @@ else:
                                 grand_result = parse_structured_products()
                                 
                                 if isinstance(grand_result, dict) and "structured_blocks" in grand_result:
+                                    # Добавляем в Excel накопитель
+                                    add_to_excel_collector(grand_result["blocks"], cat_name, f"{sub_name}_{grand['name']}", "structured_blocks")
+                                    
                                     grand["product_blocks"] = grand_result["blocks"]
                                     # Для обратной совместимости
                                     all_products = []
@@ -1657,9 +1552,16 @@ else:
                                         all_products.extend(block.get("products", []))
                                     grand["products"] = all_products
                                 elif isinstance(grand_result, dict) and "products" in grand_result:
+                                    # Добавляем в Excel накопитель
+                                    add_to_excel_collector(grand_result["products"], cat_name, f"{sub_name}_{grand['name']}", "regular_products")
+                                    
                                     grand["products"] = grand_result["products"]
                                     grand["table_headers"] = grand_result.get("table_headers", [])
                                 else:
+                                    # Добавляем в Excel накопитель (если это список товаров)
+                                    if grand_result:
+                                        add_to_excel_collector(grand_result, cat_name, f"{sub_name}_{grand['name']}", "regular_products")
+                                    
                                     grand["products"] = grand_result
                                     grand["table_headers"] = []
                                     
@@ -1669,6 +1571,8 @@ else:
                                 grand["table_headers"] = []
 
                     else:
+                        # Это товары custom_list
+                        add_to_excel_collector(items, cat_name, sub_name, "custom_list")
                         sub["products"] = items
                 else:
                     sub["products"] = []
@@ -1746,6 +1650,21 @@ else:
             else:
                 print(f"  ├── {sub['name']} (нет товаров)")
         print()
+
+    # === Создание Excel файла ===
+    print("\n" + "="*60)
+    print("СОЗДАНИЕ EXCEL ФАЙЛА")
+    print("="*60)
+    
+    excel_file = save_consolidated_excel()
+    
+    if excel_file:
+        print(f"\n🎉 Парсинг завершен!")
+        print(f"📊 Все данные сохранены в Excel файл: {os.path.basename(excel_file)}")
+        print(f"📁 Файл находится в папке: results/")
+    else:
+        print(f"\n⚠️ Excel файл не был создан")
+        print(f"📁 Проверьте CSV файлы в папке 'results/'")
 
 # === Завершение ===
 driver.quit() 
